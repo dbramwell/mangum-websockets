@@ -57,7 +57,6 @@ class WebSocketCycle:
     request: WsRequest
     message_type: str
     connection_id: str
-    websocket: WebSocket
     state: WebSocketCycleState = WebSocketCycleState.CONNECTING
 
     def __post_init__(self) -> None:
@@ -70,23 +69,10 @@ class WebSocketCycle:
     def __call__(self, app: ASGIApp, initial_body: bytes) -> Response:
         self.logger.debug("WebSocket cycle starting.")
         self.initial_body = initial_body
-
-        if self.message_type == "CONNECT":
-            scope = self.request.scope
-            del scope["aws.event"]
-            del scope["aws.context"]
-            self.loop.run_until_complete(
-                self.websocket.on_connect(self.connection_id, scope)
-            )
-        elif self.message_type == "MESSAGE":
-            self.app_queue.put_nowait({"type": "websocket.connect"})
-            asgi_instance = self.run(app)
-            asgi_task = self.loop.create_task(asgi_instance)
-            self.loop.run_until_complete(asgi_task)
-        elif self.message_type == "DISCONNECT":
-            self.loop.run_until_complete(
-                self.websocket.on_disconnect(self.connection_id)
-            )
+        # self.app_queue.put_nowait({"type": "websocket.connect"})
+        asgi_instance = self.run(app)
+        asgi_task = self.loop.create_task(asgi_instance)
+        self.loop.run_until_complete(asgi_task)
 
         return self.response
 
@@ -94,16 +80,8 @@ class WebSocketCycle:
         """
         Calls the application with the `websocket` connection scope.
         """
-        self.scope = await self.websocket.on_message(self.connection_id)
-        scope = copy.copy(self.scope)
-        scope.update(
-            {
-                "aws.event": self.request.trigger_event,
-                "aws.context": self.request.trigger_context,
-            }
-        )
         try:
-            await app(scope, self.receive, self.send)
+            await app(self.request.scope, self.receive, self.send)
         except WebSocketClosed:
             self.response.status = 403
         except UnexpectedMessage:
@@ -116,83 +94,10 @@ class WebSocketCycle:
         """
         Awaited by the application to receive ASGI `websocket` events.
         """
-        if self.state is WebSocketCycleState.CONNECTING:
-
-            # Initial ASGI connection established. The next event returned by the queue
-            # will be `websocket.connect` to initiate the handshake.
-            self.state = WebSocketCycleState.HANDSHAKE
-
-        elif self.state is WebSocketCycleState.HANDSHAKE:
-
-            # ASGI connection handshake accepted. The next event returned by the queue
-            # will be `websocket.receive` containing the message data from API Gateway.
-            self.state = WebSocketCycleState.RESPONSE
-
         return await self.app_queue.get()
 
     async def send(self, message: Message) -> None:
         """
         Awaited by the application to send ASGI `websocket` events.
         """
-        message_type = message["type"]
-        self.logger.info(
-            "%s:  '%s' event received from application.", self.state, message_type
-        )
-
-        if self.state is WebSocketCycleState.HANDSHAKE and message_type in (
-            "websocket.accept",
-            "websocket.close",
-        ):
-
-            # API Gateway handles the WebSocket client handshake in the connect event,
-            # and it cannot be negotiated by the application directly. The application
-            # may choose to close the connection at this point. This process does not
-            # support subprotocols.
-            if message_type == "websocket.accept":
-                await self.app_queue.put(
-                    {
-                        "type": "websocket.receive",
-                        "bytes": None,
-                        "text": self.initial_body.decode(),
-                    }
-                )
-            elif message_type == "websocket.close":
-                self.state = WebSocketCycleState.CLOSED
-                await self.websocket.delete_connection(self.connection_id)
-                raise WebSocketClosed
-
-        elif (
-            self.state is WebSocketCycleState.RESPONSE
-            and message_type == "websocket.close"
-        ):
-
-            # The application is explicitly closing the connection. It should be
-            # disconnected and removed in API Gateway.
-            await self.websocket.delete_connection(self.connection_id)
-
-        elif (
-            self.state is WebSocketCycleState.RESPONSE
-            and message_type == "websocket.send"
-        ):
-
-            # The application requested to send some data in response to the
-            # "websocket.receive" event. After this, a "websocket.disconnect"
-            # event is pushed to let the application finish gracefully.
-            # Then the lambda's execution is ended.
-
-            if message.get("body") is not None:
-                raise WebSocketError(
-                    "Application attemped to send a binary payload, "
-                    "but it's unsupported!"
-                )
-
-            message_text = message.get("text", "")
-            body = message_text.encode()
-
-            await self.websocket.post_to_connection(self.connection_id, body=body)
-            await self.app_queue.put({"type": "websocket.disconnect", "code": 1000})
-
-        else:
-            raise UnexpectedMessage(
-                f"{self.state}: Unexpected '{message_type}' event received."
-            )
+        return await self.app_queue.put(message)

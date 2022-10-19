@@ -86,16 +86,8 @@ class Mangum:
             request = handler.request
 
             if isinstance(request, WsRequest):
-                api_gateway_endpoint_url = (
-                    self.api_gateway_endpoint_url or handler.api_gateway_endpoint_url
-                )
-                websocket = WebSocket(
-                    dsn=self.dsn,
-                    api_gateway_endpoint_url=api_gateway_endpoint_url,
-                    api_gateway_region_name=self.api_gateway_region_name,
-                )
                 websocket_cycle = WebSocketCycle(
-                    request, handler.message_type, handler.connection_id, websocket
+                    request, handler.message_type, handler.connection_id
                 )
                 response = websocket_cycle(self.app, handler.body)
             else:

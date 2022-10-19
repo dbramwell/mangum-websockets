@@ -107,6 +107,14 @@ class WsRequest(BaseRequest):
     def scope(self) -> Scope:
         scope = super().scope
         scope.update({"type": self.type, "subprotocols": self.subprotocols})
+        # scope.update(
+        #     {
+        #         "query_string": scope["query_string"].encode(),
+        #         "headers": [[h[0].encode(), h[1].encode()] for h in scope["headers"]],
+        #         "client": tuple(scope["client"]),
+        #         "server": tuple(scope["server"]),
+        #     }
+        # )
         return scope
 
 
